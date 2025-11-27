@@ -24,8 +24,10 @@ class DatabaseConnection:
         """
         try:
             connection = pyodbc.connect(DATABASE_CONNECTION_STRING)
+            print('hecho')
             return connection
         except Exception as e:
+            print(str(e))
             if retry_count < self.max_retries:
                 time.sleep(self.retry_delay * (retry_count + 1))   
                 return self.connection(retry_count=retry_count + 1)
