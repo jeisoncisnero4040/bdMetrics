@@ -27,3 +27,10 @@ class RedisService:
                 records.append(raw)
 
         return records
+    def get(self, key: str):
+        """Obtiene un valor por clave"""
+        return self.redis.get(key)
+
+    def setex(self, key: str, ttl: int, value: str):
+        """Guarda un valor con tiempo de expiración"""
+        return self.redis.setex(key, ttl, value)
