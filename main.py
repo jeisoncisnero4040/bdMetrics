@@ -23,7 +23,9 @@ metrics_service = MetricsService(redis=redis_service, database=database_service)
 scheduler = BackgroundScheduler()
 
 def execute_metrics_job():
+    print('iniciando snapshot')
     metrics_service.processRecord("Baseconta")
+    print('finalizando snapshot')
 
 
 scheduler.add_job(
@@ -33,7 +35,7 @@ scheduler.add_job(
     timezone=timezone(TIMEZONE)  
 )
 scheduler.start()
-queries_total = Counter('sql_queries_total', 'Total de consultas ejecutadas', ['database', 'table'])
+
 
 @app.get("/metrics")
 def getmetrics():
