@@ -1,36 +1,80 @@
 from src.Utils.RedisConection import RedisConection
 from redis import Redis
-from datetime import datetime, timezone
+from typing import List, Optional, Union
+
 
 class RedisService:
+
     def __init__(self, con: RedisConection):
         self.redis: Redis = con.getConn()
 
-    def saveRecord(self, db_name: str, payload_text: str, ttl: int = 86400):
+    # ---------------------------
+    #        STRING METHODS
+    # ---------------------------
+    def set(self, key: str, value: str, ttl: Optional[int] = None):
+        if ttl:
+            return self.redis.setex(key, ttl, value)
+        return self.redis.set(key, value)
+
+    def get_value(self, key: str) -> Optional[str]:
+        raw = self.redis.get(key)
+        if raw is None:
+            return None
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+    # ---------------------------
+    #          LIST METHODS
+    # ---------------------------
+    def list_push(self, key: str, value: str):
+        return self.redis.rpush(key, value)
+
+    def list_range(self, key: str, start: int = 0, end: int = -1) -> List[str]:
+        raw_items = self.redis.lrange(key, start, end)
+        if not raw_items:
+            return []
+        return [
+            item.decode("utf-8") if isinstance(item, bytes) else str(item)
+            for item in raw_items
+        ]
+
+    def get_list(self, key: str) -> List[str]:
+        return self.list_range(key, 0, -1)
+
+    def list_trim(self, key: str, max_items: int):
+        return self.redis.ltrim(key, -max_items, -1)
+
+    # ---------------------------
+    #        KEY UTILITIES
+    # ---------------------------
+    def delete(self, key: str) -> int:
+        return self.redis.delete(key)
+
+    def exists(self, key: str) -> bool:
+        return self.redis.exists(key) == 1
+
+    def keys(self, pattern: str) -> List[str]:
+        raw_keys = self.redis.keys(pattern)
+        return [k.decode("utf-8") for k in raw_keys] if raw_keys else []
+
+    # ---------------------------
+    #       SMART AUTO GET
+    # ---------------------------
+    def get_auto(self, key: str) -> Union[str, List[str], None]:
         """
-        Guarda el payload ya convertido a text/plain (Prometheus exposition format)
+        Detecta automáticamente si la clave es string o lista.
         """
-        timestamp = datetime.now(timezone.utc).isoformat()
-        key = f"metrics:{db_name}:{timestamp}"
-        self.redis.set(key, payload_text, ex=ttl)
-        self.redis.rpush(f"metrics:index:{db_name}", key)
+        type_raw = self.redis.type(key)
 
-        return key
+        if type_raw == b'string':
+            return self.get_value(key)
 
-    def getRecords(self, db_name: str) -> list[str]:
-        keys = self.redis.lrange(f"metrics:index:{db_name}", 0, -1)
-        records = []
+        if type_raw == b'list':
+            return self.get_list(key)
 
-        for key in keys:
-            raw = self.redis.get(key)
-            if raw:
-                records.append(raw)
+        return None  # sets, hashes, zsets, nada, etc
 
-        return records
-    def get(self, key: str):
-        """Obtiene un valor por clave"""
-        return self.redis.get(key)
-
-    def setex(self, key: str, ttl: int, value: str):
-        """Guarda un valor con tiempo de expiración"""
-        return self.redis.setex(key, ttl, value)
+    # ---------------------------
+    #          PIPELINE
+    # ---------------------------
+    def pipeline(self):
+        return self.redis.pipeline()

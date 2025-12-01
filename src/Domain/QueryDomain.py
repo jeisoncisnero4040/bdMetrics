@@ -1,5 +1,8 @@
 import re
 from typing import Optional
+from src.Const.tables import TABLES
+
+
 
 class QueryDomain:
 
@@ -12,6 +15,7 @@ class QueryDomain:
         if not sql or not sql.strip():
             return "unknown"
         
+        sql = sql.lower()
         # Limpiar y normalizar el SQL
         clean_sql = QueryDomain._normalize_sql(sql)
         
@@ -22,10 +26,24 @@ class QueryDomain:
             QueryDomain._extract_from_insert(clean_sql) or
             QueryDomain._extract_from_select(clean_sql) or
             QueryDomain._extract_from_join(clean_sql) or
-            "unknown"
+            None
         )
         
+        # Si no se encontró nada, buscar la primera concordancia con TABLES
+        if not table:
+            for t in TABLES:
+                pattern = r'\b' + re.escape(t.lower()) + r'\b'
+                if re.search(pattern, clean_sql):
+                    table = t
+                    break
+        
+        if not table:
+            print('aqui en la execion')
+            print(sql)
+            table = "unknown"
+        
         return QueryDomain._clean_table_name(table)
+
 
     @staticmethod
     def _normalize_sql(sql: str) -> str:
@@ -35,6 +53,7 @@ class QueryDomain:
         # Remover comentarios
         sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
         sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+        sql = sql.replace('[', '').replace(']', '').replace('dbo','').replace('.',' ')
         return sql.strip()
 
     @staticmethod

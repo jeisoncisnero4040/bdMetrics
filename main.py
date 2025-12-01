@@ -23,9 +23,7 @@ metrics_service = MetricsService(redis=redis_service, database=database_service)
 scheduler = BackgroundScheduler()
 
 def execute_metrics_job():
-    print('iniciando snapshot')
     metrics_service.processRecord("Baseconta")
-    print('finalizando snapshot')
 
 
 scheduler.add_job(
@@ -40,7 +38,7 @@ scheduler.start()
 @app.get("/metrics")
 def getmetrics():
     """Retorna datos listos para Grafana (JSON API datasource)."""
-    data = metrics_service.fetchRecords()  # ya devuelve string tipo text/plain
+    data = metrics_service.fetchRecords()   
     return Response(data, mimetype="text/plain")
 
 if __name__ == '__main__':

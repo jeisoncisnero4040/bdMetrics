@@ -2,10 +2,11 @@ from datetime import datetime
 from src.Services.DatabaseService import DatabaseService
 from src.Services.RedisService import RedisService
 from src.Domain.QueryDomain import QueryDomain
+from src.Domain.MetricsDomain import MetricsDomain
 import pytz
-import json
 from settings.AppSettings import TIMEZONE
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
+import json
 
 
 class MetricsService:
@@ -14,268 +15,156 @@ class MetricsService:
         self.database = database
         self.timezone = pytz.timezone(TIMEZONE)
 
-    def calculate_deltas(self, current_data, previous_data):
-        """Calcula diferencias entre el snapshot actual y anterior"""
-        deltas = []
+
+    def processRecord(self, db_name:str):
+        snapshot: str = datetime.now(tz=self.timezone).isoformat()
+
+        heavy_raw = self.database.getHeaviesQueries()
+        freq_raw  = self.database.getMostRequestedQueries()
+        queries   = self.database.getCurrentQueries()      
+        users     = self.database.getCurrentUsers()
+        memory    = self.database.getMemoryUsage()         
+
+
+        # Normalización de consultas
+        heavy = MetricsDomain.normalize_queries(heavy_raw, snapshot, QueryDomain.getMainTable)
+        freq  = MetricsDomain.normalize_queries(freq_raw,  snapshot, QueryDomain.getMainTable)
+
+        grouped_heavy = MetricsDomain.group_heavy_queries(heavy)
+        grouped_freq  = MetricsDomain.group_frequent_queries(freq)
+
+        current_snapshot = MetricsDomain.build_snapshot(grouped_heavy, grouped_freq, snapshot)
+
+        # SNAPSHOT ANTERIOR
+        last_snapshot_raw = self.redis.get_value("BaseContaLastMetrics")
+
+        if not last_snapshot_raw:
+            self.redis.set("BaseContaLastMetrics", json.dumps(current_snapshot))
+            return "FIRST SNAPSHOT STORED"
+
+        last_snapshot = json.loads(last_snapshot_raw)
+
+        # DELTAS
+        new_heavy = MetricsDomain.detect_new_tables(last_snapshot["heavy"], grouped_heavy)
+        new_freq  = MetricsDomain.detect_new_tables(last_snapshot["frequent"], grouped_freq)
+
+        heavy_deltas = MetricsDomain.calculate_deltas(last_snapshot["heavy"], grouped_heavy, new_heavy)
+        freq_deltas  = MetricsDomain.calculate_deltas(last_snapshot["frequent"], grouped_freq, new_freq)
+
+        # --------------------------------------------------------
+        # REGISTRY PRINCIPAL PARA HEAVY Y FREQUENT
+        # --------------------------------------------------------
+        registry_main = CollectorRegistry()
+        gauges_cache = {}
+
+        # HEAVY EXPORT
+        for table, metrics in heavy_deltas.items():
+            for key, value in metrics.items():
+                if key == "is_new_table":
+                    continue
+
+                gauge_name = f"db_heavy_{key}"
+
+                if gauge_name not in gauges_cache:
+                    gauges_cache[gauge_name] = Gauge(
+                        gauge_name,
+                        f"Métrica heavy {key}",
+                        ["table", "snapshot", "is_new_table"],
+                        registry=registry_main,
+                    )
+
+                gauges_cache[gauge_name].labels(
+                    table=table,
+                    snapshot=snapshot,
+                    is_new_table=str(metrics["is_new_table"]),
+                ).set(value)
+
+        # FREQUENT EXPORT
+        for table, metrics in freq_deltas.items():
+            for key, value in metrics.items():
+                if key == "is_new_table":
+                    continue
+
+                gauge_name = f"db_freq_{key}"
+
+                if gauge_name not in gauges_cache:
+                    gauges_cache[gauge_name] = Gauge(
+                        gauge_name,
+                        f"Métrica freq {key}",
+                        ["table", "snapshot", "is_new_table"],
+                        registry=registry_main,
+                    )
+
+                gauges_cache[gauge_name].labels(
+                    table=table,
+                    snapshot=snapshot,
+                    is_new_table=str(metrics["is_new_table"]),
+                ).set(value)
+
+        # TEXTO PROMETHEUS DEL REGISTRY PRINCIPAL
+        main_text = generate_latest(registry_main).decode("utf-8")
+
+        # --------------------------------------------------------
+        # REGISTRY PARA QUERIES PROCESSING
+        # --------------------------------------------------------
+        registry_queries = CollectorRegistry()
         
-        for current in current_data:
-            previous = next(
-                (item for item in previous_data 
-                if item['query_text'] == current['query_text'] 
-                and item['main_table'] == current['main_table']), 
-                None
+        gauge_q = Gauge(
+            "db_current_queries",
+            "Consultas ejecutándose ahora en SQL Server",
+            ["snapshot"],
+            registry=registry_queries
+        )
+
+        current_queries = queries[0]["queries_processing_now"]
+        gauge_q.labels(snapshot=snapshot).set(current_queries)
+
+        queries_text = generate_latest(registry_queries).decode("utf-8")
+        self.redis.set("BaseContaQueriesProcessing", queries_text, 1200)
+
+        # --------------------------------------------------------
+        # REGISTRY PARA MEMORY USAGE
+        # --------------------------------------------------------
+        registry_memory = CollectorRegistry()
+
+        mem = memory[0]
+
+        for key, value in mem.items():
+            g = Gauge(
+                f"db_memory_{key}",
+                f"Métrica de memoria SQL Server: {key}",
+                ["snapshot"],
+                registry=registry_memory
             )
-            
-            delta_record = current.copy()
-            
-            # Definir campos con valores por defecto
-            fields = [
-                'execution_count', 'cpu_time_total', 'duration_total',
-                'logical_reads_total', 'logical_writes_total', 'physical_reads_total'
-            ]
-            
-            # Campos opcionales con valores por defecto
-            optional_fields = {
-                'exec_per_second': 0.0
-            }
-            
-            if previous:
-                # Calcular deltas para campos principales
-                for field in fields:
-                    current_val = current.get(field, 0)
-                    previous_val = previous.get(field, 0)
-                    delta_record[field] = current_val - previous_val
-                
-                # Manejar campos opcionales
-                for field, default_val in optional_fields.items():
-                    current_val = current.get(field, default_val)
-                    previous_val = previous.get(field, default_val)
-                    delta_record[field] = current_val - previous_val
-                    
-            else:
-                # Es la primera vez, usar valores actuales
-                for field in fields:
-                    delta_record[field] = current.get(field, 0)
-                
-                for field, default_val in optional_fields.items():
-                    delta_record[field] = current.get(field, default_val)
-            
-            deltas.append(delta_record)
-        
-        return deltas
+            g.labels(snapshot=snapshot).set(value)
 
-    def getPreviousSnapshot(self, db_name: str):
-        """Obtiene el snapshot anterior desde Redis"""
-        try:
-            previous_data = self.redis.get(f"{db_name}_snapshot_data")
-            if previous_data:
-                # Decodificar si es bytes y cargar JSON
-                if isinstance(previous_data, bytes):
-                    previous_data = previous_data.decode('utf-8')
-                return json.loads(previous_data)
-        except Exception as e:
-            print(f"Error obteniendo snapshot anterior: {e}")
-        return None
+        memory_text = generate_latest(registry_memory).decode("utf-8")
+        self.redis.set("BaseContaMemoryUsage", memory_text, 1200)
 
-    def saveCurrentSnapshot(self, db_name: str, heavy_data, frequent_data, snapshot_time: str):
-        """Guarda el snapshot actual en Redis para usar en el próximo delta"""
-        
-        def convert_datetime_to_string(obj):
-            """Convierte objetos datetime a strings ISO format"""
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            elif isinstance(obj, dict):
-                return {key: convert_datetime_to_string(value) for key, value in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_datetime_to_string(item) for item in obj]
-            else:
-                return obj
-        
-        try:
-            # Convertir cualquier datetime a string antes de serializar
-            heavy_serializable = convert_datetime_to_string(heavy_data)
-            frequent_serializable = convert_datetime_to_string(frequent_data)
-            
-            snapshot_data = {
-                'heavy': heavy_serializable,
-                'frequent': frequent_serializable,
-                'timestamp': snapshot_time
-            }
-            
-            # Guardar por 24 horas para asegurar disponibilidad en el próximo run
-            self.redis.setex(
-                f"{db_name}_snapshot_data", 
-                86400,  # 24 horas en segundos
-                json.dumps(snapshot_data, default=str)  # Usar default=str como respaldo
-            )
-            print(f"Snapshot guardado exitosamente para {db_name}")
-            
-        except Exception as e:
-            print(f"Error guardando snapshot: {e}")
+        # --------------------------------------------------------
+        # GUARDAR SNAPSHOT PRINCIPAL E HISTORIAL
+        # --------------------------------------------------------
+        self.redis.set("BaseContaLastMetrics", json.dumps(current_snapshot))
 
-    def processRecord(self, db_name: str):
-        # Obtener datos actuales (sin procesar aún)
-        raw_heavy = self.database.getHeaviesQuery()       
-        raw_frequent = self.database.getMostRequestedQueries()   
-        snapshot_time = datetime.now(tz=self.timezone).isoformat()
+        record_key = f"metrics:{db_name}:{snapshot}"
+        self.redis.set(record_key, main_text, ttl=86400)
+        self.redis.redis.rpush(f"metrics:index:{db_name}", record_key)
 
-        # Función para normalizar y asegurar campos
-        def normalize_query_data(query_list):
-            normalized = []
-            for item in query_list:
-                # Asegurar que todos los campos existan
-                normalized_item = {
-                    'query_text': item.get('query_text', ''),
-                    'execution_count': item.get('execution_count', 0),
-                    'cpu_time_total': item.get('cpu_time_total', 0),
-                    'duration_total': item.get('duration_total', 0),
-                    'logical_reads_total': item.get('logical_reads_total', 0),
-                    'logical_writes_total': item.get('logical_writes_total', 0),
-                    'physical_reads_total': item.get('physical_reads_total', 0),
-                    'exec_per_second': item.get('exec_per_second', 0.0),
-                    'main_table': QueryDomain.getMainTable(item.get('query_text', '')),
-                    'snapshot': snapshot_time
-                }
-                normalized.append(normalized_item)
-            return normalized
+        # RETORNO FINAL CONCATENADO (3 REGISTRIES)
+        return "\n".join([main_text, queries_text, memory_text])
 
-        # Normalizar los datos
-        normalized_heavy = normalize_query_data(raw_heavy)
-        normalized_frequent = normalize_query_data(raw_frequent)
-
-        # Obtener snapshot anterior y calcular deltas
-        previous_data = self.getPreviousSnapshot(db_name)
-        
-        # Hacer copias para guardar el estado actual antes de calcular deltas
-        current_heavy = [item.copy() for item in normalized_heavy]
-        current_frequent = [item.copy() for item in normalized_frequent]
-        
-        # Aplicar deltas a los datos que se exportarán a Prometheus
-        if previous_data:
-            normalized_heavy = self.calculate_deltas(normalized_heavy, previous_data.get('heavy', []))
-            normalized_frequent = self.calculate_deltas(normalized_frequent, previous_data.get('frequent', []))
-        
-        registry = CollectorRegistry()
-
-        # DEFINICIÓN DE MÉTRICAS DELTA
-        queries_total = Gauge(
-            'delta_sql_queries_total',
-            'Delta de consultas ejecutadas desde último snapshot',
-            ['database', 'table', 'snapshot'],
-            registry=registry
-        )
-
-        cpu_total = Gauge(
-            'delta_sql_query_cpu_total',
-            'Delta de CPU usado por query desde último snapshot (ms)',
-            ['database', 'query', 'table', 'snapshot'],
-            registry=registry
-        )
-
-        duration_total = Gauge(
-            'delta_sql_query_duration_total',
-            'Delta de duración de queries desde último snapshot (ms)',
-            ['database', 'query', 'table', 'snapshot'],
-            registry=registry
-        )
-
-        logical_reads_total = Gauge(
-            'delta_sql_query_logical_reads_total',
-            'Delta de lecturas lógicas desde último snapshot',
-            ['database', 'query', 'table', 'snapshot'],
-            registry=registry
-        )
-
-        logical_writes_total = Gauge(
-            'delta_sql_query_logical_writes_total',
-            'Delta de escrituras lógicas desde último snapshot',
-            ['database', 'query', 'table', 'snapshot'],
-            registry=registry
-        )
-
-        physical_reads_total = Gauge(
-            'delta_sql_query_physical_reads_total',
-            'Delta de lecturas físicas desde último snapshot',
-            ['database', 'query', 'table', 'snapshot'],
-            registry=registry
-        )
-
-        exec_per_second = Gauge(
-            'delta_sql_query_exec_per_second',
-            'Ejecuciones por segundo de la query',
-            ['database', 'query', 'table', 'snapshot'],
-            registry=registry
-        )
-
-        # EXPORTAR MÉTRICAS DELTA A PROMETHEUS
-        for query in normalized_frequent:
-            table = query['main_table']
-            q_text = query['query_text']
-
-            queries_total.labels(
-                database=db_name, table=table, snapshot=snapshot_time
-            ).set(query['execution_count'])
-
-            cpu_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('cpu_time_total', 0))
-
-            duration_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('duration_total', 0))
-
-            logical_reads_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('logical_reads_total', 0))
-
-            logical_writes_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('logical_writes_total', 0))
-
-            physical_reads_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('physical_reads_total', 0))
-
-            exec_per_second.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('exec_per_second', 0))
-
-        for query in normalized_heavy:
-            table = query['main_table']
-            q_text = query['query_text']
-
-            cpu_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('cpu_time_total', 0))
-
-            duration_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('duration_total', 0))
-
-            logical_reads_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('logical_reads_total', 0))
-
-            logical_writes_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('logical_writes_total', 0))
-
-            physical_reads_total.labels(
-                database=db_name, query=q_text, table=table, snapshot=snapshot_time
-            ).set(query.get('physical_reads_total', 0))
-
-        prometheus_text = generate_latest(registry).decode('utf-8')
-
-        # Guardar snapshot actual para el próximo cálculo de deltas
-        self.saveCurrentSnapshot(db_name, current_heavy, current_frequent, snapshot_time)
-
-        # Guardar métricas en Redis para la API
-        key = self.redis.saveRecord(db_name, prometheus_text)
-        return key
 
     def fetchRecords(self):
-        """
-        Devuelve todas las métricas guardadas en Redis en formato text/plain listo para Prometheus
-        """
-        records = self.redis.getRecords('Baseconta')
-        return "\n".join(records)
+        keys = self.redis.list_range("metrics:index:Baseconta")
+        records = []
+
+        for key in keys:
+            raw = self.redis.get_value(key)
+            if raw:
+                records.append(raw)
+
+        # Añadir los registries de memoria y queries processing
+        records.append(self.redis.get_value("BaseContaQueriesProcessing"))
+        records.append(self.redis.get_value("BaseContaMemoryUsage"))
+
+        return "\n".join(filter(None, records))
