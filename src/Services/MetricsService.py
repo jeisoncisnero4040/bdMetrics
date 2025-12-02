@@ -16,26 +16,25 @@ class MetricsService:
         self.timezone = pytz.timezone(TIMEZONE)
 
 
-    def processRecord(self, db_name:str):
+    def processRecord(self, db_name: str):
         snapshot: str = datetime.now(tz=self.timezone).isoformat()
 
         heavy_raw = self.database.getHeaviesQueries()
-        freq_raw  = self.database.getMostRequestedQueries()
-        queries   = self.database.getCurrentQueries()      
-        users     = self.database.getCurrentUsers()
-        memory    = self.database.getMemoryUsage()         
+        freq_raw = self.database.getMostRequestedQueries()
+        queries = self.database.getCurrentQueries()
+        users = self.database.getCurrentUsers()
+        memory = self.database.getMemoryUsage()
 
-
-        # Normalización de consultas
+        # Normalización
         heavy = MetricsDomain.normalize_queries(heavy_raw, snapshot, QueryDomain.getMainTable)
-        freq  = MetricsDomain.normalize_queries(freq_raw,  snapshot, QueryDomain.getMainTable)
+        freq = MetricsDomain.normalize_queries(freq_raw, snapshot, QueryDomain.getMainTable)
 
         grouped_heavy = MetricsDomain.group_heavy_queries(heavy)
-        grouped_freq  = MetricsDomain.group_frequent_queries(freq)
+        grouped_freq = MetricsDomain.group_frequent_queries(freq)
 
         current_snapshot = MetricsDomain.build_snapshot(grouped_heavy, grouped_freq, snapshot)
 
-        # SNAPSHOT ANTERIOR
+        # Snapshot anterior
         last_snapshot_raw = self.redis.get_value("BaseContaLastMetrics")
 
         if not last_snapshot_raw:
@@ -44,15 +43,15 @@ class MetricsService:
 
         last_snapshot = json.loads(last_snapshot_raw)
 
-        # DELTAS
+        # Deltas
         new_heavy = MetricsDomain.detect_new_tables(last_snapshot["heavy"], grouped_heavy)
-        new_freq  = MetricsDomain.detect_new_tables(last_snapshot["frequent"], grouped_freq)
+        new_freq = MetricsDomain.detect_new_tables(last_snapshot["frequent"], grouped_freq)
 
         heavy_deltas = MetricsDomain.calculate_deltas(last_snapshot["heavy"], grouped_heavy, new_heavy)
-        freq_deltas  = MetricsDomain.calculate_deltas(last_snapshot["frequent"], grouped_freq, new_freq)
+        freq_deltas = MetricsDomain.calculate_deltas(last_snapshot["frequent"], grouped_freq, new_freq)
 
         # --------------------------------------------------------
-        # REGISTRY PRINCIPAL PARA HEAVY Y FREQUENT
+        # REGISTRY PRINCIPAL (SIN SNAPSHOT EN LABELS)
         # --------------------------------------------------------
         registry_main = CollectorRegistry()
         gauges_cache = {}
@@ -69,13 +68,12 @@ class MetricsService:
                     gauges_cache[gauge_name] = Gauge(
                         gauge_name,
                         f"Métrica heavy {key}",
-                        ["table", "snapshot", "is_new_table"],
+                        ["table", "is_new_table"],
                         registry=registry_main,
                     )
 
                 gauges_cache[gauge_name].labels(
                     table=table,
-                    snapshot=snapshot,
                     is_new_table=str(metrics["is_new_table"]),
                 ).set(value)
 
@@ -91,39 +89,35 @@ class MetricsService:
                     gauges_cache[gauge_name] = Gauge(
                         gauge_name,
                         f"Métrica freq {key}",
-                        ["table", "snapshot", "is_new_table"],
+                        ["table", "is_new_table"],
                         registry=registry_main,
                     )
 
                 gauges_cache[gauge_name].labels(
                     table=table,
-                    snapshot=snapshot,
                     is_new_table=str(metrics["is_new_table"]),
                 ).set(value)
 
-        # TEXTO PROMETHEUS DEL REGISTRY PRINCIPAL
         main_text = generate_latest(registry_main).decode("utf-8")
 
         # --------------------------------------------------------
-        # REGISTRY PARA QUERIES PROCESSING
+        # CURRENT QUERIES (SIN SNAPSHOT)
         # --------------------------------------------------------
         registry_queries = CollectorRegistry()
-        
+
         gauge_q = Gauge(
             "db_current_queries",
             "Consultas ejecutándose ahora en SQL Server",
-            ["snapshot"],
             registry=registry_queries
         )
 
-        current_queries = queries[0]["queries_processing_now"]
-        gauge_q.labels(snapshot=snapshot).set(current_queries)
+        gauge_q.set(queries[0]["queries_processing_now"])
 
         queries_text = generate_latest(registry_queries).decode("utf-8")
         self.redis.set("BaseContaQueriesProcessing", queries_text, 1200)
 
         # --------------------------------------------------------
-        # REGISTRY PARA MEMORY USAGE
+        # MEMORY USAGE (SIN SNAPSHOT)
         # --------------------------------------------------------
         registry_memory = CollectorRegistry()
 
@@ -133,38 +127,29 @@ class MetricsService:
             g = Gauge(
                 f"db_memory_{key}",
                 f"Métrica de memoria SQL Server: {key}",
-                ["snapshot"],
                 registry=registry_memory
             )
-            g.labels(snapshot=snapshot).set(value)
+            g.set(value)
 
         memory_text = generate_latest(registry_memory).decode("utf-8")
         self.redis.set("BaseContaMemoryUsage", memory_text, 1200)
 
         # --------------------------------------------------------
-        # GUARDAR SNAPSHOT PRINCIPAL E HISTORIAL
+        # GUARDAR SNAPSHOT PARA SIGUIENTES DELTAS (NO PROMETHEUS)
         # --------------------------------------------------------
         self.redis.set("BaseContaLastMetrics", json.dumps(current_snapshot))
 
-        record_key = f"metrics:{db_name}:{snapshot}"
+        # Ahora NO usamos snapshot en la clave
+        record_key = f"metrics:{db_name}"
         self.redis.set(record_key, main_text, ttl=86400)
-        self.redis.redis.rpush(f"metrics:index:{db_name}", record_key)
 
-        # RETORNO FINAL CONCATENADO (3 REGISTRIES)
         return "\n".join([main_text, queries_text, memory_text])
 
 
     def fetchRecords(self):
-        keys = self.redis.list_range("metrics:index:Baseconta")
-        records = []
+        record = self.redis.get_value("metrics:Baseconta")
 
-        for key in keys:
-            raw = self.redis.get_value(key)
-            if raw:
-                records.append(raw)
+        mem = self.redis.get_value("BaseContaMemoryUsage")
+        q = self.redis.get_value("BaseContaQueriesProcessing")
 
-        # Añadir los registries de memoria y queries processing
-        records.append(self.redis.get_value("BaseContaQueriesProcessing"))
-        records.append(self.redis.get_value("BaseContaMemoryUsage"))
-
-        return "\n".join(filter(None, records))
+        return "\n".join(filter(None, [record, q, mem]))
