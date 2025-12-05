@@ -37,14 +37,7 @@ class BdRepository:
                         ) + 1
                     ) AS query_text
                 FROM sys.dm_exec_query_stats qs
-                CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
-                WHERE 
-                    DB_NAME(st.dbid) = 'Baseconta'          
-                    AND st.text NOT LIKE '%sys.%'           
-                    AND st.text NOT LIKE '%dm_%'            
-                    AND st.text NOT LIKE '%INTERNAL%'      
-                    AND st.text NOT LIKE '%sp_%'            
-                    AND st.text NOT LIKE '%xp_%'           
+                CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st       
                 ORDER BY qs.total_worker_time DESC;
         """
         return self.__fetchQuery(query=query)

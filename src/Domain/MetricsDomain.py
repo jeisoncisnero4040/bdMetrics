@@ -151,3 +151,51 @@ class MetricsDomain:
 
         # Si no es interpretable → 0
         return 0
+    
+    @staticmethod
+    def generate_texplain_top10(heavy_raw, table_resolver):
+        """
+        Construye un TOP 10 para tabla en Grafana.
+        heavy_raw: lista de queries con métricas.
+        table_resolver: función para extraer nombre de tabla principal.
+        """
+        top10 = heavy_raw[:10]  # ya viene ordenado por total_worker_time DESC
+
+        result = []
+
+        for idx, row in enumerate(top10, start=1):
+            table = table_resolver(row["query_text"])
+            safe_query = row["query_text"].replace('"', '\\"').replace("\n", " ")
+
+            result.append({
+                "rank": idx,
+                "table": table,
+                "cpu_time_total": row["cpu_time_total"],
+                "duration_total": row["duration_total"],
+                "logical_reads_total": row["logical_reads_total"],
+                "logical_writes_total": row["logical_writes_total"],
+                "physical_reads_total": row["physical_reads_total"],
+                "plan_reuse_count": row["plan_reuse_count"],
+                "query_text": safe_query  # <-- agregado
+            })
+
+        return result
+    @staticmethod
+    def generate_texplain_users(current_users_raw):
+        """
+        Construye un 'texplain' para usuarios conectados.
+        current_users_raw: resultado de getCurrentUsers()
+        """
+        top_users = current_users_raw
+
+        result = []
+        for idx, row in enumerate(top_users, start=1):
+            result.append({
+                "rank": idx,
+                "host_name": row["host_name"],
+                "client_net_address": row["client_net_address"],
+                "program_name": row["program_name"],
+                "requests_running_now": row["requests_running_now"]
+            })
+
+        return result

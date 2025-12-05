@@ -8,7 +8,7 @@ from src.Services.RedisService import RedisService
 from src.Utils.DatabaseConnection import DatabaseConnection
 from src.Repositories.BdRepository import BdRepository
 from settings.AppSettings import TIMEZONE
-from prometheus_client import Counter, generate_latest
+from src.Services.PrometheusService import PrometheusService
 
 app = Flask(__name__)
 
@@ -17,7 +17,8 @@ databaseConnection = DatabaseConnection()
 bdRepo = BdRepository(db_connection=databaseConnection)
 database_service = DatabaseService(repo=bdRepo)
 redis_service = RedisService(RedisConection())
-metrics_service = MetricsService(redis=redis_service, database=database_service)
+prometheus=PrometheusService()
+metrics_service = MetricsService(redis=redis_service, database=database_service,prometheus=prometheus)
 
 
 scheduler = BackgroundScheduler()
